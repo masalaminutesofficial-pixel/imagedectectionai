@@ -1,23 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
-import { runInspection, isLiveModeAvailable } from "@/lib/ai/provider";
-import { getExpectedCondition } from "@/config/inspectionTests";
+import { analyzeInspectionImage, isGeminiConfigured } from "@/lib/gemini";
+import { getServerExpectedCondition } from "@/config/inspection-tests";
 
 export async function GET() {
   return NextResponse.json({
     status: "ready",
-    service: "Wind Turbine AI Visual Inspection Service",
-    isLiveMode: isLiveModeAvailable()
+    service: "Wind Turbine AI Visual Inspection API (Gemini)",
+    isLiveMode: isGeminiConfigured()
   });
 }
 
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { model, test, image, expectedCondition, imageName, demoScenario } = body;
+    const { model, test, image, demoScenario } = body;
 
     if (!model || typeof model !== "string") {
       return NextResponse.json(
-        { error: "Wind turbine model is required." },
+        { error: "Turbine model selection is required." },
         { status: 400 }
       );
     }
@@ -31,21 +31,48 @@ export async function POST(req: NextRequest) {
 
     if (!image || typeof image !== "string") {
       return NextResponse.json(
-        { error: "Inspection image (base64 data URL or URL) is required." },
+        { error: "Photograph upload or capture is required." },
         { status: 400 }
       );
     }
 
-    // Resolve expected condition if not provided
-    const resolvedExpectedCondition =
-      expectedCondition || getExpectedCondition(model, test);
+    // Size check: Base64 string length should not exceed ~12MB (representing ~9MB image file)
+    if (image.length > 15 * 1024 * 1024) {
+      return NextResponse.json(
+        { error: "Image file exceeds maximum allowable size (10 MB). Please upload a smaller image." },
+        { status: 413 }
+      );
+    }
 
-    const result = await runInspection({
-      model,
-      test,
-      image,
-      expectedCondition: resolvedExpectedCondition,
-      imageName,
+    // Extract MIME type and pure base64 data
+    let mimeType = "image/jpeg";
+    let pureBase64 = image;
+
+    if (image.startsWith("data:")) {
+      const match = image.match(/^data:([a-zA-Z0-9]+\/[a-zA-Z0-9-.+]+);base64,(.+)$/);
+      if (match) {
+        mimeType = match[1];
+        pureBase64 = match[2];
+      } else {
+        // SVG or unencoded data URL fallback
+        const svgMatch = image.match(/^data:image\/svg\+xml;utf8,(.+)$/);
+        if (svgMatch) {
+          mimeType = "image/svg+xml";
+          pureBase64 = Buffer.from(decodeURIComponent(svgMatch[1])).toString("base64");
+        }
+      }
+    }
+
+    // Server-authoritative expected condition. NEVER trust client-supplied condition.
+    const serverExpectedCondition = getServerExpectedCondition(model, test);
+
+    // Perform analysis with Gemini (or simulated demo if requested/unconfigured)
+    const result = await analyzeInspectionImage({
+      modelName: model,
+      testName: test,
+      serverExpectedCondition,
+      imageBase64: pureBase64,
+      mimeType,
       demoScenario
     });
 
@@ -55,14 +82,17 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         result: "REVIEW",
-        confidence: 0.5,
-        conclusion: "Inspection analysis could not be completed.",
+        conclusion: "Visual inspection could not be processed.",
         reason:
           error instanceof Error
             ? error.message
-            : "An unexpected error occurred during inspection processing.",
-        isDemoMode: !isLiveModeAvailable(),
-        provider: "mock",
+            : "An unexpected error occurred during visual inspection analysis.",
+        expectedCondition: "Component must satisfy manufacturer QA specifications.",
+        confidence: 0.5,
+        isDemoMode: true,
+        provider: "simulated",
+        modelUsed: "Error Fallback",
+        disclaimer: "AI-assisted visual assessment — not a certified quality decision.",
         timestamp: new Date().toISOString()
       },
       { status: 500 }
